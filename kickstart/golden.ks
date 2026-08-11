@@ -24,7 +24,7 @@ firewall --enabled --service=ssh
 authselect select sssd --force
 services --enabled=auditd,firewalld,chronyd --disabled=cups,avahi-daemon,bluetooth
 
-bootloader --location=mbr --boot-drive=sda --password=--iscrypted ${BOOTLOADER_PW_HASH}
+bootloader --location=mbr --boot-drive=sda --iscrypted --password=${BOOTLOADER_PW_HASH}
 
 zerombr
 clearpart --all --initlabel --drives=sda
