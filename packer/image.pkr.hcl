@@ -43,9 +43,9 @@ source "amazon-ebs" "golden" {
   ami_description = "CIS-hardened golden image built ${timestamp()}"
 
   tags = {
-    Name        = var.image_name
-    BuiltBy     = "packer"
-    Hardened    = "true"
+    Name         = var.image_name
+    BuiltBy      = "packer"
+    Hardened     = "true"
     KickstartRef = var.kickstart_file
   }
 }
