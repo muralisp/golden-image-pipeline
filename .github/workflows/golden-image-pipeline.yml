@@ -1,0 +1,187 @@
+name: Golden Image Pipeline
+
+# Builds, hardens, validates, and publishes a "golden" OS image using
+# Packer (build automation) + Kickstart (unattended OS install) +
+# PXE config (network boot for on-prem baremetal targets).
+#
+# Trigger on a schedule (monthly patch refresh), on changes to the
+# image-definition files, or manually with an environment input.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_env:
+        description: "Environment to build/publish the image for"
+        required: true
+        default: "staging"
+        type: choice
+        options: [staging, production]
+  schedule:
+    - cron: "0 3 1 * *"   # monthly rebuild for patching / CVE refresh
+  push:
+    branches: [main]
+    paths:
+      - "packer/**"
+      - "kickstart/**"
+      - "pxe/**"
+      - "scripts/**"
+
+permissions:
+  contents: read
+  id-token: write   # needed for OIDC auth to cloud provider (no long-lived secrets)
+
+env:
+  PACKER_VERSION: "1.11.2"
+  IMAGE_NAME: "golden-image"
+
+jobs:
+  # ---------------------------------------------------------------
+  # 1. Lint & validate all image-definition source before building
+  # ---------------------------------------------------------------
+  validate:
+    name: Validate Packer + Kickstart + PXE configs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@v3
+        with:
+          version: ${{ env.PACKER_VERSION }}
+
+      - name: Packer init (download plugins)
+        run: packer init packer/image.pkr.hcl
+
+      - name: Packer fmt check
+        run: packer fmt -check -diff packer/
+
+      - name: Packer validate
+        run: packer validate packer/image.pkr.hcl
+
+      - name: Lint Kickstart file (ksvalidator)
+        run: |
+          pip install --quiet pykickstart
+          ksvalidator kickstart/golden.ks
+
+      - name: Shellcheck hardening scripts
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: "./scripts"
+
+  # ---------------------------------------------------------------
+  # 2. Build the image with Packer (which drives the Kickstart
+  #    unattended install) and run the hardening script inside it
+  # ---------------------------------------------------------------
+  build:
+    name: Build golden image
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.target_env || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@v3
+        with:
+          version: ${{ env.PACKER_VERSION }}
+
+      # Short-lived cloud credentials via OIDC — no static secrets stored
+      - name: Configure cloud credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.PACKER_BUILD_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Packer init
+        run: packer init packer/image.pkr.hcl
+
+      - name: Build image
+        id: build
+        run: |
+          packer build \
+            -var "image_name=${{ env.IMAGE_NAME }}-$(date +%Y%m%d)" \
+            -var "kickstart_file=kickstart/golden.ks" \
+            -var "hardening_script=scripts/harden.sh" \
+            -color=false \
+            packer/image.pkr.hcl | tee packer-build.log
+
+      - name: Capture built image ID
+        id: image_id
+        run: |
+          IMAGE_ID=$(grep -oP '(?<=Artifact ID: )\S+' packer-build.log | tail -1)
+          echo "image_id=$IMAGE_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build log
+        uses: actions/upload-artifact@v4
+        with:
+          name: packer-build-log
+          path: packer-build.log
+
+    outputs:
+      image_id: ${{ steps.image_id.outputs.image_id }}
+
+  # ---------------------------------------------------------------
+  # 3. Scan the built image for CVEs and CIS-benchmark drift before
+  #    it's allowed to be published/promoted
+  # ---------------------------------------------------------------
+  scan:
+    name: Security scan (CVE + CIS benchmark)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: "image"
+          image-ref: ${{ needs.build.outputs.image_id }}
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"        # fail the pipeline on critical/high CVEs
+          format: "table"
+
+      - name: OpenSCAP CIS benchmark scan
+        run: |
+          sudo apt-get update && sudo apt-get install -y openscap-scanner ssg-debderived
+          oscap xccdf eval \
+            --profile xccdf_org.ssgproject.content_profile_cis \
+            --results cis-results.xml \
+            --report cis-report.html \
+            /usr/share/xml/scap/ssg/content/ssg-*-ds.xml || true
+
+      - name: Upload scan reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-scan-reports
+          path: |
+            cis-report.html
+            cis-results.xml
+
+  # ---------------------------------------------------------------
+  # 4. Publish the golden image to the image registry / cloud image
+  #    catalog and register PXE boot entries for baremetal targets
+  # ---------------------------------------------------------------
+  publish:
+    name: Publish image & register PXE entry
+    needs: [build, scan]
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.target_env || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag image as validated/golden
+        run: |
+          echo "Promoting ${{ needs.build.outputs.image_id }} to golden-validated"
+          # e.g. aws ec2 create-tags / az image update / gcloud compute images update
+
+      - name: Sync PXE boot config for baremetal fleet
+        run: |
+          echo "Copying PXE config + kickstart to TFTP/HTTP boot server"
+          rsync -av pxe/pxelinux.cfg/ "${{ secrets.PXE_SERVER_HOST }}:/tftpboot/pxelinux.cfg/"
+          rsync -av kickstart/golden.ks "${{ secrets.PXE_SERVER_HOST }}:/var/www/html/ks/golden.ks"
+
+      - name: Notify team
+        run: |
+          echo "Golden image ${{ needs.build.outputs.image_id }} published for ${{ github.event.inputs.target_env || 'staging' }}"
+          # e.g. Slack webhook notification here

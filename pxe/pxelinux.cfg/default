@@ -1,0 +1,19 @@
+DEFAULT golden-image
+
+LABEL golden-image
+    MENU LABEL Golden Image (CIS-hardened, automated install)
+    KERNEL images/rhel9/vmlinuz
+    APPEND initrd=images/rhel9/initrd.img \
+        inst.repo=http://mirror.internal.example.com/rhel9/os/x86_64 \
+        inst.ks=http://ks-server.internal.example.com/ks/golden.ks \
+        inst.ks.sendmac \
+        ip=dhcp \
+        console=ttyS0,115200n8 \
+        quiet
+
+LABEL local
+    MENU LABEL Boot from local disk
+    LOCALBOOT 0
+
+PROMPT 0
+TIMEOUT 50
