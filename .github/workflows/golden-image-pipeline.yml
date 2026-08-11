@@ -122,41 +122,44 @@ jobs:
       image_id: ${{ steps.image_id.outputs.image_id }}
 
   # ---------------------------------------------------------------
-  # 3. Scan the built image for CVEs and CIS-benchmark drift before
-  #    it's allowed to be published/promoted
+  # 3. Scan the IaC source for misconfig/secrets. CVE and CIS-benchmark
+  #    scanning of the actual image happens inside the Packer build
+  #    itself (see packer/image.pkr.hcl) — the build fails outright if
+  #    either check finds a CRITICAL/HIGH issue, so a vulnerable or
+  #    non-compliant image never reaches this stage in the first place.
   # ---------------------------------------------------------------
   scan:
-    name: Security scan (CVE + CIS benchmark)
+    name: Scan IaC source (misconfig + secrets)
     needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Trivy vulnerability scan
+      # Note: OS package CVE scanning happens *inside* the Packer build
+      # now (see packer/image.pkr.hcl) — Trivy's image scan-type can't
+      # target an AMI ID directly, only container images/tarballs, so
+      # scanning it here against a GitHub runner with no access to the
+      # built AMI's filesystem never worked. This step instead scans
+      # the IaC source itself for misconfigurations and accidentally
+      # committed secrets (hardcoded passwords/keys in the Kickstart,
+      # Packer template, or hardening scripts).
+      - name: Trivy config & secret scan (IaC source)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          scan-type: "image"
-          image-ref: ${{ needs.build.outputs.image_id }}
+          scan-type: "fs"
+          scanners: "misconfig,secret"
+          scan-ref: "."
           severity: "CRITICAL,HIGH"
-          exit-code: "1"        # fail the pipeline on critical/high CVEs
+          exit-code: "1"
           format: "table"
 
-      - name: OpenSCAP CIS benchmark scan
-        run: |
-          sudo apt-get update && sudo apt-get install -y openscap-scanner ssg-debderived
-          oscap xccdf eval \
-            --profile xccdf_org.ssgproject.content_profile_cis \
-            --results cis-results.xml \
-            --report cis-report.html \
-            /usr/share/xml/scap/ssg/content/ssg-*-ds.xml || true
-
-      - name: Upload scan reports
-        uses: actions/upload-artifact@v4
-        with:
-          name: security-scan-reports
-          path: |
-            cis-report.html
-            cis-results.xml
+      # Note: the CIS/OpenSCAP compliance scan also now runs inside the
+      # Packer build (see the oscap provisioner in image.pkr.hcl) and
+      # gates the build itself — a compliance-failing image never
+      # finishes building. The report lands at
+      # /var/log/cis-baseline-report.html on the built instance; pull
+      # it via SSM Session Manager or scp against a launched instance
+      # if you need to review it after the fact.
 
   # ---------------------------------------------------------------
   # 4. Publish the golden image to the image registry / cloud image
