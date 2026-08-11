@@ -28,7 +28,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write   # needed for OIDC auth to cloud provider (no long-lived secrets)
 
 env:
   PACKER_VERSION: "1.11.2"
@@ -85,20 +84,13 @@ jobs:
         with:
           version: ${{ env.PACKER_VERSION }}
 
-      # Short-lived cloud credentials via OIDC — no static secrets stored
-      - name: Debug OIDC token claims
-        run: |
-          curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | \
-            jq -R 'split(".") | .[1] | @base64d | fromjson'
-        env:
-          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
-          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
-
-      - name: Configure cloud credentials (OIDC)
+      # Static IAM user credentials (long-lived) — simpler to set up than OIDC,
+      # but requires manual key rotation. See README for the trade-offs.
+      - name: Configure cloud credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.PACKER_BUILD_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
 
       - name: Packer init
