@@ -86,6 +86,15 @@ jobs:
           version: ${{ env.PACKER_VERSION }}
 
       # Short-lived cloud credentials via OIDC — no static secrets stored
+      - name: Debug OIDC token claims
+        run: |
+          curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | \
+            jq -R 'split(".") | .[1] | @base64d | fromjson'
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
+          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+
       - name: Configure cloud credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
